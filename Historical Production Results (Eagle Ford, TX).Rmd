@@ -1,0 +1,353 @@
+---
+title: "Historical Production Results (Eagle Ford, TX)"
+author: "Shu Cong"
+date: "March 30, 2017"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_knit$set(root.dir = './')  # Relative address
+
+knitr::opts_chunk$set(echo = F,
+                      warning = F,
+                      fig.height = 4,
+                      message = F)
+
+
+options(xtable.comment = FALSE) # Remove comments when generating LATEX code
+
+# Loading packages
+pkgs = c('ggplot2', 'reshape2', 'plyr', 'tidyverse', 'lubridate', 'stringr', 'xtable')
+inp = pkgs[!pkgs %in% installed.packages()[,1]]
+if(length(inp) > 0){
+  install.packages(inp)
+}
+for(p in pkgs){
+  require(p, character.only = T)
+}
+rm(pkgs, inp, p)
+```
+
+
+```{r data_import}
+cache = T # Use cache? If FALSE, you need to look at clusters of kmeans and re-redine the centers
+read_intv = 10000;
+
+if(cache){
+  load('cache.RData')
+}else{
+  ##### Import data #####
+  comp_file = 'EagleFord_Well Meta.txt'
+  prod_file = 'EagleFord_Production.txt'; file_encoding = 'UTF-16LE'
+  selected_headers = c('api', 'operator_name')
+  
+  # Load production file
+  read.table(prod_file, header = T, sep = '\t', 
+             fileEncoding = file_encoding, stringsAsFactors = F,
+             colClasses = c(rep('character', 4), rep('numeric', 4))) ->
+    dat
+  
+  api_list = unique(dat$api)
+  
+  # Load company file
+  f = file(comp_file, open = "r", blocking = F, encoding = file_encoding)
+  
+  f %>% 
+    readLines(f, n = 1) %>% 
+    str_split('\\t', simplify = T) ->
+    header
+  
+  cols = which(header %in% selected_headers)
+  api_col = which(header %in% 'api')
+  
+  # Read *read_intv* lines per loop and look for completion, if TRUE, break
+  comp_api = NULL; count = 0
+  while(length(content <- readLines(f, n = read_intv)) > 0){
+    content %>% 
+      str_split('\\t', simplify = T) %>% 
+      subset.matrix(select = cols) %>% 
+      data.frame(stringsAsFactors = F) ->
+      tmp
+    
+    names(tmp) = selected_headers
+    
+    # Filter out api not on the list
+    tmp = tmp[tmp$api %in% api_list, ]
+    # api_list = api_list[!api_list %in% tmp]
+    
+    
+    comp_api = rbind(comp_api, tmp)
+    
+    print(str_c(count * read_intv + length(content), ' rows found! ', nrow(tmp), ' match.')); count = count + 1
+  }
+  
+  ### Join two tables
+  data = left_join(dat, comp_api, by = 'api')
+  
+  ##### Clean #####
+  data %>% 
+    mutate(
+      Month = as.Date(date, '%m/%d/%Y'),
+      operator_name = str_replace_all(operator_name, '\\"', ''),
+      Year = year(Month)
+    ) %>% 
+    select(
+      API = api,
+      Index = index,
+      Company = operator_name,
+      Year = Year,
+      Month = Month,
+      Oil_Production = volume_oil_formation_bbls
+    ) ->
+    dat
+  
+  ##### Clean #####
+  dat %>% 
+    filter(Year > 2000) ->
+    dat
+}
+
+
+```
+
+
+## Data Clean
+
+Year 1993 has only two rows, which could be a mistake. These two rows are to be removed. Also, there exists some missing values in the column *index* though I don't think this column plays any role in the analysis. Also, the oil production varies from zero to $`r max(dat$Oil_Production)`$, highly skewed. There could be some outliers. However, I'm not going to delete those points due to the lack of oil rig background.
+
+
+## Problem 1: Determine and summarize historical aggregate oil production by company over time 
+
+See **[Oil Production] Monthly Aggregate by Company.csv** (Monthly total), or **[Oil Production] Annual Aggregate by Company.csv** (Annual summation) for details, here's visualization result.
+
+Data Description:
+
+
+* Company: Operator
+* Month/Year: Timestamp
+* Oil_Production_Aggregate: Total oil production during that month/year
+* Active_Wells: Number of wells that has **non-zero production**
+
+
+
+```{r}
+##### Determine and summarize historical aggregate oil production by company over time #####
+dat %>% 
+  group_by(Company, Month) %>% 
+  dplyr::summarise(Oil_Production_Aggregate = sum(Oil_Production),
+                   Well_Numbers = length(unique(API)),
+                   Active_Wells = length(unique(API[Oil_Production > 0]))) %>% 
+  ungroup() %>% 
+  arrange(Company, Month) ->
+  OPA_m
+
+dat %>% 
+  group_by(Company, Year) %>% 
+  dplyr::summarise(Oil_Production_Aggregate = sum(Oil_Production),
+                   Well_Numbers = length(unique(API)),
+                   Active_Wells = length(unique(API[Oil_Production > 0]))) %>% 
+  ungroup() %>% 
+  arrange(Company, Year) ->
+  OPA_y
+
+OPA_m %>% 
+  filter(Company %in% head(unique(Company), 5)) %>% 
+  mutate(Company = str_c(str_sub(Company, end = 15), '...'),
+         log_Aggregate_production = log10(Oil_Production_Aggregate)) %>% 
+ggplot() + 
+  aes(x = Month, y = log_Aggregate_production, 
+      group = Company, color = Company) +
+  geom_line() +
+  ggtitle('log10 of Monthly Production by Company (Five Samples)') +
+  xlim(as.Date('2011-01-01'), max(dat$Month))
+
+write.csv(OPA_m, '[Oil Production] Monthly Aggregate by Company.csv', row.names = F)
+write.csv(OPA_y, '[Oil Production] Annual Aggregate by Company.csv', row.names = F)
+```
+
+I choose the first 15 companies and plot their log of oil production from 2011 to as-of-date. I use log (base = 10) here to keep them in the same graph.
+
+## Problem 2: Determine and summarize historical average oil production per well by company
+
+See **[Oil Production] Production by Well X Company.csv** for average production per well by company by API.
+
+See **[Oil Production] Production per Well by Company.csv** for monthly weighted average production per well by Company, here's visualization result.
+
+Output Description: 
+
+
+* Company: Operator
+* API: Api number
+* sum_per_Well: For this api, what's the total oil production
+* Total_Months: How many months in the data for certain api
+* P_per_Month: Average (monthly) oil production for this well
+
+
+```{r}
+# ABRAXAS PETROLEUM CORPORATION 42285334510000 85 0
+# ACTIVA RESOURCES, LLC 0
+
+dat %>% 
+  group_by(Company, API) %>% 
+  dplyr::summarise(
+    sum_per_Well = sum(Oil_Production),
+    Total_Months = n()
+    # Producing_Months = sum(Oil_Production > 0)
+    ) %>% 
+  mutate(
+    P_per_Month = sum_per_Well / Total_Months
+    # P_per_Production_Month = sum_per_Well / Producing_Months
+  ) %>% 
+  ungroup() ->
+  OPM_m
+# OPM_m$P_per_Production_Month[is.nan(OPM_m$P_per_Production_Month)] = 0
+
+
+OPM_m %>% 
+  group_by(Company) %>% 
+  dplyr::summarise(
+    Total_Production = sum(sum_per_Well),
+    Total_Month = sum(Total_Months),
+    # Total_Production_Month = sum(Producing_Months),
+    P_per_Well_Monthly = mean(P_per_Month)
+    # P_per_Active_Well_Monthly = mean(P_per_Production_Month),
+    # P_per_Well_Total = sum(sum_per_Well) / n()
+  ) ->
+  OPM_h
+
+
+Mean_Production_Monthly = mean(OPM_h$P_per_Well_Monthly)
+OPM_h %>% 
+  ggplot() +
+  aes(x = P_per_Well_Monthly) +
+  geom_histogram(bins = 100) + 
+  geom_vline(xintercept = Mean_Production_Monthly, color = 'red') +
+  ggtitle(str_c('Monthly Production per Well by Company (Histogram, average = ', str_sub(Mean_Production_Monthly, end = 6), ')'))
+  
+write.csv(OPM_h, '[Oil Production] Production per Well by Company.csv', row.names = F)
+
+write.csv(OPM_m, '[Oil Production] Production by Well X Company.csv', row.names = F)
+```
+
+Histogram of monthly production per well (All wells, including zero-production wells) among these companies. The average is $`r Mean_Production_Monthly`$.
+
+
+## Problem 3: Based on their history, which company or companies are likely to drill the most productive wells going forward?
+
+
+
+```{r}
+dat %>% 
+  group_by(Company, Month) %>% 
+  dplyr::summarise(
+    Total_Production = sum(Oil_Production),
+    Well_Number = length(unique(API)),
+    # Active_Well = length(unique(API[Oil_Production > 0])) / Well_Number,
+    Production_per_Well = Total_Production / Well_Number
+  ) %>% 
+  ungroup() ->
+  OP
+OP$Production_per_Well[is.nan(OP$Production_per_Well)] = 0
+write.csv(OP, '[Oil Production] Monthly Production per Well by Company.csv')
+```
+
+
+```{r}
+m = 3
+tmp = dcast(OP, Month ~ Company, sum, value.var = 'Production_per_Well')
+tmp = tmp[tmp$Month > as.Date('2013-01-01'), ]
+n = nrow(tmp)
+tm = NULL
+for(i in 1:(n-m + 1)){
+  tm = rbind(tm, 
+             c(
+               rep(0, (i - 1)),
+               rep(1, m),
+               rep(0, (n - m - i + 1))
+             ))
+}
+tm  = tm/m
+# OP = data.frame(Month = tmp$Month[-(1:(m-1))] ,tm %*% as.matrix(tmp[,-1]))
+tmp = tm %*% as.matrix(tmp[,-1])
+
+nclusters = 4
+if(!cache){
+  re = kmeans(t(tmp[,]), nclusters)
+}
+
+ct = c(1,2)
+candidate = names(re$cluster)[re$cluster %in% ct];
+
+tmp = dcast(OP, Month ~ Company, sum, value.var = 'Production_per_Well')
+tmp = tmp[, candidate]
+
+apply(tmp, 2, function(x){
+  x = tail(x, 6)
+  c(Q25 = quantile(x, 0.25),Median = median(x),
+    Mean = mean(x),
+    Q75 = quantile(x, 0.75), Max = max(x))
+}) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  cbind(Company = candidate) %>% 
+  arrange(desc(Median)) ->
+  tmp
+
+candidate_table = tmp
+
+```
+
+
+Top 3 Companies:
+
+1. `r candidate_table$Company[1]`
+2. `r candidate_table$Company[2]`
+3. `r candidate_table$Company[3]`
+
+Reason: They have upward-trend production per well for the last 3 years and good production per well rate for the lastest 6 months.
+
+See **[Oil Production] Monthly Production per Well by Company.csv** for monthly production per well by company
+
+```{r}
+col = c('black', 'green', 'blue', 'purple', 'yellow')[1:nclusters]
+matplot(t(re$centers), type='l', col = col, lty = 1,
+        xlab = 'Months, from 2013-01-01',
+        ylab = 'Monthly production per well',
+        main = str_c(m, '-Month moving average clusters (Kmeans)')); legend('topleft', str_c('Cluster', 1:nclusters), col = col, lty = 1)
+```
+
+The production per well varies too much from month to month. Therefore I calculate the $`r m`$ month moving average and use kmeans learning method to classify these production curve. From the plot above, we might want those in cluster 1, 2
+
+```{r, results='asis'}
+
+xtable(head(candidate_table, 20))
+
+
+```
+
+There are only `r length(candidate)` companies in these cluster. Therefore I list their last half-year production summaries by calculating 25%, 50%, 75% quantiles as well as average and maximum, sorted by **Median** in decreasing order. (Only select top 20 companies)
+
+```{r}
+OP %>% 
+  filter(Company %in% candidate_table$Company[1:3],
+         Month >= as.Date('2014-08-01')) %>% 
+  ggplot()+
+  aes(x = Month, y = Production_per_Well, group = Company)+
+  geom_smooth(method = 'loess', alpha = 0.3, span = 0.5, size = 1, linetype = "dashed")+
+  geom_line(size = 1) +
+  facet_wrap(~Company , scale = 'free_x') +
+  ggtitle('Production per Well by Month for Top-Three Companies')+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  
+```
+
+```{r}
+if(!cache){
+  save(dat, re, file = 'cache.RData')
+}
+
+```
+
+
